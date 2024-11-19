@@ -24,7 +24,7 @@ const swaggerOptions = {
         },
         servers: [
             {
-                url: `https://api-vhlo.onrender.com`,
+                url: `http://localhost:${PORT}`,
             },
         ],
         components: {
