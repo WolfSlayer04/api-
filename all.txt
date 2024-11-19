@@ -1,0 +1,1829 @@
+app.js:
+const express = require('express');
+const swaggerJsDoc = require('swagger-jsdoc');
+const swaggerUi = require('swagger-ui-express');
+const connectDB = require('./db');
+const usersRoutes = require('./routes/users');
+const patientsRoutes = require('./routes/patients');
+const nursesRoutes = require('./routes/nurses');
+const serviceRequestRoutes = require('./routes/serviceRequests');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json());
+connectDB();
+
+// Configuración de Swagger con Autorización JWT
+const swaggerOptions = {
+    swaggerDefinition: {
+        openapi: '3.0.0',
+        info: {
+            title: 'Mi API',
+            version: '1.0.0',
+            description: 'Documentación de la API con autenticación JWT',
+        },
+        servers: [
+            {
+                url: `http://localhost:${PORT}`,
+            },
+        ],
+        components: {
+            securitySchemes: {
+                bearerAuth: {
+                    type: 'http',
+                    scheme: 'bearer',
+                    bearerFormat: 'JWT',
+                    description: "Agrega aquí tu token JWT para autenticación",
+                },
+            },
+        },
+        security: [
+            {
+                bearerAuth: [],
+            },
+        ],
+    },
+    apis: ['./routes/*.js'],
+};
+
+const swaggerDocs = swaggerJsDoc(swaggerOptions);
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+
+// Rutas
+app.use('/users', usersRoutes);
+app.use('/patients', patientsRoutes);
+app.use('/nurses', nursesRoutes);
+app.use('/service-requests', serviceRequestRoutes);
+
+// Iniciar servidor
+app.listen(PORT, () => {
+    console.log(`Servidor corriendo en http://localhost:${PORT}/api-docs`);
+});
+routes\index.js:
+const express = require('express');
+const router = express.Router();
+const usersRoutes = require('./users'); // Asegúrate de que esto esté correcto
+const nursesRoutes = require('./nurses'); // Si lo tienes
+const serviceRequestRoutes = require('./serviceRequests'); // Importa el archivo correcto
+
+// Define las rutas
+router.use('/users', usersRoutes);
+router.use('/nurses', nursesRoutes);
+router.use('/service-requests', serviceRequestRoutes); // Asegúrate de que esto sea correcto
+
+module.exports = router;
+routes\messages.js:
+const express = require('express');
+const Message = require('../models/Message');
+const ServiceRequest = require('../models/ServiceRequest');
+const { authenticateToken } = require('../middleware/auth');
+
+const router = express.Router();
+
+/**
+ * @swagger
+ * tags:
+ *   name: Messages
+ *   description: Endpoints para la mensajería entre cliente y enfermero
+ */
+
+/**
+ * @swagger
+ * /messages:
+ *   post:
+ *     summary: Enviar un mensaje en una solicitud de servicio
+ *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               service_request_id:
+ *                 type: string
+ *                 description: "ID de la solicitud de servicio"
+ *               receiver_id:
+ *                 type: string
+ *                 description: "ID del usuario receptor del mensaje"
+ *               content:
+ *                 type: string
+ *                 description: "Contenido del mensaje"
+ *     responses:
+ *       201:
+ *         description: Mensaje enviado exitosamente
+ *       400:
+ *         description: Error al enviar el mensaje
+ */
+router.post('/', authenticateToken, async (req, res) => {
+  const { service_request_id, receiver_id, content } = req.body;
+
+  try {
+    // Verificar que el usuario está involucrado en la solicitud de servicio
+    const serviceRequest = await ServiceRequest.findOne({
+      _id: service_request_id,
+      $or: [{ user_id: req.userId }, { nurse_id: req.userId }]
+    });
+
+    if (!serviceRequest) {
+      return res.status(403).json({ message: 'Acceso denegado' });
+    }
+
+    // Crear y guardar el mensaje
+    const message = new Message({
+      service_request_id,
+      sender_id: req.userId,
+      receiver_id,
+      content
+    });
+
+    await message.save();
+
+    res.status(201).json({ message: 'Mensaje enviado exitosamente', messageData: message });
+  } catch (error) {
+    res.status(400).json({ message: 'Error al enviar el mensaje', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /messages/{service_request_id}:
+ *   get:
+ *     summary: Obtener el historial de mensajes de una solicitud de servicio
+ *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: service_request_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la solicitud de servicio
+ *     responses:
+ *       200:
+ *         description: Historial de mensajes de la solicitud de servicio
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 properties:
+ *                   sender_id:
+ *                     type: string
+ *                   receiver_id:
+ *                     type: string
+ *                   content:
+ *                     type: string
+ *                   timestamp:
+ *                     type: string
+ *                     format: date-time
+ *       403:
+ *         description: Acceso denegado
+ */
+router.get('/:service_request_id', authenticateToken, async (req, res) => {
+  try {
+    // Verificar que el usuario está involucrado en la solicitud de servicio
+    const serviceRequest = await ServiceRequest.findOne({
+      _id: req.params.service_request_id,
+      $or: [{ user_id: req.userId }, { nurse_id: req.userId }]
+    });
+
+    if (!serviceRequest) {
+      return res.status(403).json({ message: 'Acceso denegado' });
+    }
+
+    // Obtener todos los mensajes asociados a la solicitud de servicio
+    const messages = await Message.find({ service_request_id: req.params.service_request_id }).sort({ timestamp: 1 });
+
+    res.status(200).json(messages);
+  } catch (error) {
+    res.status(400).json({ message: 'Error al obtener el historial de mensajes', error: error.message });
+  }
+});
+
+module.exports = router;
+
+routes\nurses.js:
+const express = require('express');
+const Nurse = require('../models/Nurse');
+const { authenticateToken, generateToken } = require('../middleware/auth');
+
+const router = express.Router();
+
+/**
+ * @swagger
+ * tags:
+ *   name: Nurses
+ *   description: Endpoints para la gestión de enfermeros
+ */
+
+/**
+ * @swagger
+ * /nurses:
+ *   get:
+ *     summary: Obtener enfermeros (sin datos sensibles)
+ *     tags: [Nurses]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Lista de enfermeros
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 properties:
+ *                   name:
+ *                     type: string
+ *                   fecha_nacimiento:
+ *                     type: string
+ *                   genero:
+ *                     type: string
+ *                   descripcion:
+ *                     type: string
+ *                   especialidad:
+ *                     type: string
+ *                   ubicacion:
+ *                     type: string
+ *                   tarifa:
+ *                     type: number
+ *                   disponibilidad:
+ *                     type: array
+ *                     items:
+ *                       type: string
+ *                   certificados:
+ *                     type: array
+ *                     items:
+ *                       type: string
+ *       500:
+ *         description: Error en el servidor
+ */
+router.get('/', authenticateToken, async (req, res) => {
+  try {
+    const nurses = await Nurse.find({}, '-user_name -password -_id');
+    res.status(200).json(nurses);
+  } catch (error) {
+    res.status(500).json({ message: 'Error en el servidor' });
+  }
+});
+
+/**
+ * @swagger
+ * /nurses/search:
+ *   get:
+ *     summary: Búsqueda de enfermeros con filtros
+ *     tags: [Nurses]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: especialidad
+ *         schema:
+ *           type: string
+ *         description: Especialidad del enfermero (p. ej., geriatría, cuidados intensivos)
+ *       - in: query
+ *         name: ubicacion
+ *         schema:
+ *           type: string
+ *         description: Ubicación del enfermero para facilitar desplazamientos
+ *       - in: query
+ *         name: tarifa
+ *         schema:
+ *           type: number
+ *         description: Tarifa máxima diaria del enfermero
+ *     responses:
+ *       200:
+ *         description: Lista de enfermeros que cumplen con los filtros
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 properties:
+ *                   name:
+ *                     type: string
+ *                   especialidad:
+ *                     type: string
+ *                   ubicacion:
+ *                     type: string
+ *                   tarifa:
+ *                     type: number
+ *       500:
+ *         description: Error en el servidor
+ */
+router.get('/search', authenticateToken, async (req, res) => {
+  const { especialidad, ubicacion, tarifa } = req.query;
+
+  const filters = {};
+  if (especialidad) filters.especialidad = especialidad;
+  if (ubicacion) filters.ubicacion = ubicacion;
+  if (tarifa) filters.tarifa = { $lte: tarifa };
+
+  try {
+    const nurses = await Nurse.find(filters, '-user_name -password -_id');
+    res.status(200).json(nurses);
+  } catch (error) {
+    res.status(500).json({ message: 'Error en el servidor', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /nurses/register:
+ *   post:
+ *     summary: Registro de enfermero
+ *     tags: [Nurses]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 description: "Nombre completo del enfermero"
+ *               user_name:
+ *                 type: string
+ *                 description: "Nombre de usuario del enfermero"
+ *               password:
+ *                 type: string
+ *                 description: "Contraseña del enfermero"
+ *               genero:
+ *                 type: string
+ *                 description: "Género del enfermero"
+ *               fecha_nacimiento:
+ *                 type: string
+ *                 description: "Fecha de nacimiento del enfermero"
+ *               tarifa:
+ *                 type: number
+ *                 description: "Tarifa diaria del enfermero"
+ *               certificados:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: "Certificados y licencias"
+ *               especialidad:
+ *                 type: string
+ *                 description: "Especialidad profesional"
+ *               ubicacion:
+ *                 type: string
+ *                 description: "Ubicación"
+ *               disponibilidad:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     dia:
+ *                       type: string
+ *                       description: "Día de la semana"
+ *                     horaInicio:
+ *                       type: string
+ *                       description: "Hora de inicio"
+ *                     horaFin:
+ *                       type: string
+ *                       description: "Hora de fin"
+ *     responses:
+ *       201:
+ *         description: Enfermero registrado exitosamente
+ *       400:
+ *         description: Error en el registro del enfermero
+ */
+router.post('/register', async (req, res) => {
+  try {
+    const {
+      name,
+      user_name,
+      password,
+      genero,
+      fecha_nacimiento,
+      tarifa,
+      certificados,
+      especialidad,
+      ubicacion,
+      disponibilidad
+    } = req.body;
+
+    const newNurse = new Nurse({
+      name,
+      user_name,
+      password,
+      genero,
+      fecha_nacimiento,
+      tarifa,
+      certificados,
+      especialidad,
+      ubicacion,
+      disponibilidad
+    });
+
+    await newNurse.save();
+    const token = generateToken(newNurse._id);
+    res.status(201).json({
+      message: 'Enfermero registrado exitosamente',
+      nurse: newNurse,
+      token: `Bearer ${token}`
+    });
+  } catch (error) {
+    res.status(400).json({
+      message: 'Error en el registro del enfermero',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /nurses/login:
+ *   post:
+ *     summary: Inicio de sesión de enfermero
+ *     tags: [Nurses]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               user_name:
+ *                 type: string
+ *                 description: "Nombre de usuario del enfermero"
+ *               password:
+ *                 type: string
+ *                 description: "Contraseña del enfermero"
+ *     responses:
+ *       200:
+ *         description: Inicio de sesión exitoso
+ *       401:
+ *         description: Credenciales incorrectas
+ */
+router.post('/login', async (req, res) => {
+  const { user_name, password } = req.body;
+
+  try {
+    const nurse = await Nurse.findOne({ user_name, password });
+    if (!nurse) {
+      return res.status(401).json({ message: 'Credenciales incorrectas' });
+    }
+
+    const token = generateToken({ userId: nurse._id, role: 'enfermero' });
+    res.json({ token, role: 'enfermero' });
+  } catch (error) {
+    res.status(500).json({ message: 'Error en el inicio de sesión', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /nurses/me/disponibilidad:
+ *   put:
+ *     summary: Configurar disponibilidad del enfermero
+ *     tags: [Nurses]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               disponibilidad:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     dia:
+ *                       type: string
+ *                     horaInicio:
+ *                       type: string
+ *                     horaFin:
+ *                       type: string
+ *     responses:
+ *       200:
+ *         description: Disponibilidad actualizada exitosamente
+ *       400:
+ *         description: Error al actualizar disponibilidad
+ */
+router.put('/me/disponibilidad', authenticateToken, async (req, res) => {
+  const { disponibilidad } = req.body;
+
+  try {
+    const updatedNurse = await Nurse.findByIdAndUpdate(
+      req.userId,
+      { disponibilidad },
+      { new: true }
+    );
+
+    if (!updatedNurse) {
+      return res.status(404).json({ message: 'Enfermero no encontrado' });
+    }
+
+    res.status(200).json({ message: 'Disponibilidad actualizada exitosamente', disponibilidad: updatedNurse.disponibilidad });
+  } catch (error) {
+    res.status(400).json({ message: 'Error al actualizar disponibilidad', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /nurses/me:
+ *   put:
+ *     summary: Actualizar el perfil del enfermero autenticado
+ *     tags: [Nurses]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               especialidad:
+ *                 type: string
+ *               certificados:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *               disponibilidad:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     dia:
+ *                       type: string
+ *                     horaInicio:
+ *                       type: string
+ *                     horaFin:
+ *                       type: string
+ *     responses:
+ *       200:
+ *         description: Perfil actualizado exitosamente
+ *       400:
+ *         description: Error al actualizar perfil
+ */
+router.put('/me', authenticateToken, async (req, res) => {
+  const { especialidad, certificados, disponibilidad } = req.body;
+
+  try {
+    const updatedNurse = await Nurse.findByIdAndUpdate(
+      req.userId,
+      { especialidad, certificados, disponibilidad },
+      { new: true }
+    );
+
+    if (!updatedNurse) {
+      return res.status(404).json({ message: 'Enfermero no encontrado' });
+    }
+
+    res.status(200).json({ message: 'Perfil actualizado exitosamente', nurse: updatedNurse });
+  } catch (error) {
+    res.status(400).json({ message: 'Error al actualizar perfil', error: error.message });
+  }
+});
+
+module.exports = router;
+
+routes\patients.js:
+const express = require('express');
+const Patient = require('../models/Patient');
+const { authenticateToken } = require('../middleware/auth');
+
+const router = express.Router();
+
+/**
+ * @swagger
+ * tags:
+ *   name: Patients
+ *   description: Endpoints para la gestión de pacientes
+ */
+
+/**
+ * @swagger
+ * /patients:
+ *   get:
+ *     summary: Obtener pacientes del usuario autenticado
+ *     tags: [Patients]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Lista de pacientes del usuario
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 properties:
+ *                   name:
+ *                     type: string
+ *                   fecha_nacimiento:
+ *                     type: string
+ *                   genero:
+ *                     type: string
+ *                   descripcion:
+ *                     type: string
+ *       500:
+ *         description: Error al obtener los pacientes
+ */
+router.get('/', authenticateToken, async (req, res) => {
+  try {
+    const patients = await Patient.find({ usuario_id: req.userId });
+    const patientsWithoutID = patients.map(patient => {
+      const { _id, ...patientData } = patient.toObject();
+      return patientData;
+    });
+    res.json(patientsWithoutID);
+  } catch (error) {
+    res.status(500).json({ message: 'Error al obtener los pacientes' });
+  }
+});
+
+/**
+ * @swagger
+ * /patients:
+ *   post:
+ *     summary: Agregar un nuevo paciente
+ *     tags: [Patients]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *               fecha_nacimiento:
+ *                 type: string
+ *               genero:
+ *                 type: string
+ *               descripcion:
+ *                 type: string
+ *               movilidad:
+ *                  type: string
+ *     responses:
+ *       201:
+ *         description: Paciente agregado exitosamente
+ *       400:
+ *         description: Error al crear el paciente
+ */
+router.post('/', authenticateToken, async (req, res) => {
+  try {
+    const newPatient = new Patient({ ...req.body, usuario_id: req.userId });
+    await newPatient.save();
+    res.status(201).json(newPatient);
+  } catch (error) {
+    res.status(400).json({ message: 'Error al crear el paciente', error: error.message });
+  }
+});
+
+module.exports = router;
+routes\reviews.js:
+const express = require('express');
+const Review = require('../models/Review');
+const ServiceRequest = require('../models/ServiceRequest');
+const { authenticateToken } = require('../middleware/auth');
+
+const router = express.Router();
+
+/**
+ * @swagger
+ * tags:
+ *   name: Reviews
+ *   description: Endpoints para gestión de reseñas y calificaciones
+ */
+
+/**
+ * @swagger
+ * /reviews:
+ *   post:
+ *     summary: Crear una reseña y calificación para un enfermero
+ *     tags: [Reviews]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nurse_id:
+ *                 type: string
+ *                 description: "ID del enfermero evaluado"
+ *               service_request_id:
+ *                 type: string
+ *                 description: "ID de la solicitud de servicio completada"
+ *               calificacion:
+ *                 type: number
+ *                 minimum: 1
+ *                 maximum: 5
+ *                 description: "Calificación de 1 a 5"
+ *               comentario:
+ *                 type: string
+ *                 description: "Comentario opcional sobre el servicio"
+ *     responses:
+ *       201:
+ *         description: Reseña creada exitosamente
+ *       400:
+ *         description: Error al crear la reseña
+ */
+router.post('/', authenticateToken, async (req, res) => {
+  const { nurse_id, service_request_id, calificacion, comentario } = req.body;
+
+  try {
+    // Verificar que el servicio fue completado
+    const serviceRequest = await ServiceRequest.findOne({
+      _id: service_request_id,
+      user_id: req.userId,
+      nurse_id,
+      estado: 'completado'
+    });
+
+    if (!serviceRequest) {
+      return res.status(400).json({ message: 'No se puede evaluar un servicio que no ha sido completado' });
+    }
+
+    // Crear la reseña
+    const review = new Review({
+      nurse_id,
+      user_id: req.userId,
+      service_request_id,
+      calificacion,
+      comentario
+    });
+
+    await review.save();
+
+    res.status(201).json({ message: 'Reseña creada exitosamente', review });
+  } catch (error) {
+    res.status(400).json({ message: 'Error al crear la reseña', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /reviews/{nurse_id}:
+ *   get:
+ *     summary: Obtener todas las reseñas y calificaciones de un enfermero
+ *     tags: [Reviews]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: nurse_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID del enfermero para obtener sus reseñas
+ *     responses:
+ *       200:
+ *         description: Lista de reseñas y calificaciones del enfermero
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 properties:
+ *                   calificacion:
+ *                     type: number
+ *                   comentario:
+ *                     type: string
+ *                   createdAt:
+ *                     type: string
+ *                     format: date-time
+ *       403:
+ *         description: Acceso denegado
+ *       404:
+ *         description: Enfermero no encontrado o sin reseñas
+ */
+router.get('/:nurse_id', authenticateToken, async (req, res) => {
+    try {
+      const nurse_id = req.params.nurse_id;
+  
+      // Verificar que el usuario autenticado es el enfermero que consulta las reseñas
+      if (req.userId !== nurse_id) {
+        return res.status(403).json({ message: 'Acceso denegado' });
+      }
+  
+      // Obtener todas las reseñas del enfermero
+      const reviews = await Review.find({ nurse_id }).sort({ createdAt: -1 });
+  
+      if (!reviews.length) {
+        return res.status(404).json({ message: 'No se encontraron reseñas para este enfermero' });
+      }
+  
+      res.status(200).json(reviews);
+    } catch (error) {
+      res.status(400).json({ message: 'Error al obtener las reseñas', error: error.message });
+    }
+  });
+  
+  module.exports = router;
+  
+  routes\serviceRequests.js:
+
+  const express = require('express');
+const ServiceRequest = require('../models/ServiceRequest');
+const { authenticateToken } = require('../middleware/auth');
+
+const router = express.Router();
+
+/**
+ * @swagger
+ * tags:
+ *   name: ServiceRequests
+ *   description: Endpoints para la gestión de solicitudes de servicio de enfermería
+ */
+
+/**
+ * @swagger
+ * /service-requests:
+ *   post:
+ *     summary: Crear una nueva solicitud de servicio
+ *     tags: [ServiceRequests]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nurse_id:
+ *                 type: string
+ *                 description: "ID del enfermero asignado"
+ *               patient_ids:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: "IDs de los pacientes seleccionados para el servicio"
+ *               detalles:
+ *                 type: string
+ *               fecha:
+ *                 type: string
+ *                 format: date
+ *               tarifa:
+ *                 type: number
+ *     responses:
+ *       201:
+ *         description: Solicitud de servicio creada exitosamente
+ *       400:
+ *         description: Error al crear la solicitud de servicio
+ */
+router.post('/', authenticateToken, async (req, res) => {
+  const { nurse_id, patient_ids, detalles, fecha, tarifa } = req.body;
+  try {
+    const newRequest = new ServiceRequest({
+      user_id: req.userId,
+      nurse_id,
+      patient_ids,
+      detalles,
+      fecha,
+      tarifa
+    });
+    await newRequest.save();
+    res.status(201).json(newRequest);
+  } catch (error) {
+    res.status(400).json({ message: 'Error al crear la solicitud de servicio', error: error.message });
+  }
+});
+/**
+ * @swagger
+ * /service-requests:
+ *   get:
+ *     summary: Obtener todas las solicitudes de servicio asignadas al enfermero autenticado
+ *     tags: [ServiceRequests]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Lista de solicitudes de servicio asignadas al enfermero
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 properties:
+ *                   user_id:
+ *                     type: string
+ *                   patient_ids:
+ *                     type: array
+ *                     items:
+ *                       type: string
+ *                   detalles:
+ *                     type: string
+ *                   fecha:
+ *                     type: string
+ *                     format: date
+ *                   tarifa:
+ *                     type: number
+ *       500:
+ *         description: Error al obtener las solicitudes
+ */
+router.get('/', authenticateToken, async (req, res) => {
+    try {
+      const requests = await ServiceRequest.find({ nurse_id: req.userId }).populate('patient_ids', 'name fecha_nacimiento genero descripcion');
+      res.json(requests);
+    } catch (error) {
+      res.status(500).json({ message: 'Error al obtener las solicitudes', error: error.message });
+    }
+  });
+/**
+ * @swagger
+ * tags:
+ *   name: ServiceRequests
+ *   description: Endpoints para la gestión de solicitudes de servicio de enfermería
+ */
+
+/**
+ * @swagger
+ * /service-requests:
+ *   post:
+ *     summary: Crear una nueva solicitud de servicio para un enfermero específico
+ *     tags: [ServiceRequests]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nurse_id:
+ *                 type: string
+ *                 description: "ID del enfermero seleccionado para el servicio"
+ *               patient_ids:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: "IDs de los pacientes que requieren atención"
+ *               detalles:
+ *                 type: string
+ *                 description: "Información adicional sobre el servicio"
+ *               fecha:
+ *                 type: string
+ *                 format: date
+ *               tarifa:
+ *                 type: number
+ *                 description: "Tarifa acordada para el servicio"
+ *     responses:
+ *       201:
+ *         description: Solicitud de servicio creada exitosamente
+ *       400:
+ *         description: Error al crear la solicitud de servicio
+ */
+router.post('/', authenticateToken, async (req, res) => {
+    const { nurse_id, patient_ids, detalles, fecha, tarifa } = req.body;
+    try {
+      // Verificar que el usuario tenga acceso a los pacientes seleccionados
+      const validPatients = await Patient.find({ _id: { $in: patient_ids }, usuario_id: req.userId });
+      if (validPatients.length !== patient_ids.length) {
+        return res.status(403).json({ message: 'Acceso denegado a uno o más pacientes seleccionados' });
+      }
+  
+      const newRequest = new ServiceRequest({
+        user_id: req.userId,
+        nurse_id,
+        patient_ids,
+        detalles,
+        fecha,
+        tarifa
+      });
+      await newRequest.save();
+      res.status(201).json(newRequest);
+    } catch (error) {
+      res.status(400).json({ message: 'Error al crear la solicitud de servicio', error: error.message });
+    }
+  });
+  
+ /**
+ * @swagger
+ * tags:
+ *   name: ServiceRequests
+ *   description: Endpoints para la gestión de solicitudes de servicio de enfermería
+ */
+
+/**
+ * @swagger
+ * /service-requests:
+ *   get:
+ *     summary: Obtener todas las solicitudes pendientes del enfermero autenticado
+ *     tags: [ServiceRequests]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Lista de solicitudes pendientes del enfermero
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 properties:
+ *                   _id:
+ *                     type: string
+ *                   patient_ids:
+ *                     type: array
+ *                     items:
+ *                       type: string
+ *                   detalles:
+ *                     type: string
+ *                   fecha:
+ *                     type: string
+ *                     format: date
+ *                   tarifa:
+ *                     type: number
+ *                   estado:
+ *                     type: string
+ *       500:
+ *         description: Error al obtener las solicitudes
+ */
+router.get('/', authenticateToken, async (req, res) => {
+    try {
+      const requests = await ServiceRequest.find({ nurse_id: req.userId, estado: 'pendiente' }).populate('patient_ids', 'name fecha_nacimiento genero descripcion');
+      res.status(200).json(requests);
+    } catch (error) {
+      res.status(500).json({ message: 'Error al obtener las solicitudes', error: error.message });
+    }
+  });
+  
+  /**
+   * @swagger
+   * /service-requests/{id}:
+   *   put:
+   *     summary: Aceptar o rechazar una solicitud de servicio
+   *     tags: [ServiceRequests]
+   *     security:
+   *       - bearerAuth: []
+   *     parameters:
+   *       - in: path
+   *         name: id
+   *         required: true
+   *         schema:
+   *           type: string
+   *         description: ID de la solicitud de servicio
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             properties:
+   *               estado:
+   *                 type: string
+   *                 enum: [aceptada, rechazada]
+   *                 description: "Nuevo estado de la solicitud de servicio"
+   *     responses:
+   *       200:
+   *         description: Estado de la solicitud actualizado exitosamente
+   *       400:
+   *         description: Error al actualizar la solicitud
+   */
+  router.put('/:id', authenticateToken, async (req, res) => {
+    const { estado } = req.body;
+  
+    // Validar que el estado es aceptado o rechazado
+    if (!['aceptada', 'rechazada'].includes(estado)) {
+      return res.status(400).json({ message: 'Estado inválido, debe ser "aceptada" o "rechazada"' });
+    }
+  
+    try {
+      const request = await ServiceRequest.findOneAndUpdate(
+        { _id: req.params.id, nurse_id: req.userId },
+        { estado },
+        { new: true }
+      );
+  
+      if (!request) {
+        return res.status(404).json({ message: 'Solicitud de servicio no encontrada' });
+      }
+  
+      res.status(200).json({ message: `Solicitud ${estado} exitosamente`, request });
+    } catch (error) {
+      res.status(400).json({ message: 'Error al actualizar la solicitud', error: error.message });
+    }
+  });
+  
+/**
+ * @swagger
+ * /service-requests/{id}/pagar:
+ *   put:
+ *     summary: Marcar el servicio como pagado por el usuario
+ *     tags: [ServiceRequests]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la solicitud de servicio
+ *     responses:
+ *       200:
+ *         description: Servicio marcado como pagado exitosamente
+ *       400:
+ *         description: Error al procesar el pago
+ *       403:
+ *         description: Acceso denegado o solicitud no pertenece al usuario
+ */
+router.put('/:id/pagar', authenticateToken, async (req, res) => {
+  try {
+    // Verificar que la solicitud pertenece al usuario autenticado y que el pago aún no ha sido realizado
+    const serviceRequest = await ServiceRequest.findOne({
+      _id: req.params.id,
+      user_id: req.userId,
+      pago_realizado: false
+    });
+
+    if (!serviceRequest) {
+      return res.status(403).json({ message: 'Acceso denegado o la solicitud ya está pagada' });
+    }
+
+    // Marcar la solicitud como pagada
+    serviceRequest.pago_realizado = true;
+    await serviceRequest.save();
+
+    res.status(200).json({ message: 'Servicio marcado como pagado exitosamente', serviceRequest });
+  } catch (error) {
+    res.status(400).json({ message: 'Error al procesar el pago', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /service-requests/{id}/estado-pago:
+ *   get:
+ *     summary: Verificar el estado de pago de una solicitud de servicio
+ *     tags: [ServiceRequests]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la solicitud de servicio
+ *     responses:
+ *       200:
+ *         description: Estado del pago de la solicitud
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 pago_realizado:
+ *                   type: boolean
+ *                 pago_liberado:
+ *                   type: boolean
+ *                 estado:
+ *                   type: string
+ *       403:
+ *         description: Acceso denegado
+ *       404:
+ *         description: Solicitud no encontrada
+ */
+router.get('/:id/estado-pago', authenticateToken, async (req, res) => {
+  try {
+    // Verificar que la solicitud pertenece al enfermero autenticado
+    const serviceRequest = await ServiceRequest.findOne({
+      _id: req.params.id,
+      nurse_id: req.userId
+    });
+
+    if (!serviceRequest) {
+      return res.status(403).json({ message: 'Acceso denegado' });
+    }
+
+    res.status(200).json({
+      pago_realizado: serviceRequest.pago_realizado,
+      pago_liberado: serviceRequest.pago_liberado,
+      estado: serviceRequest.estado
+    });
+  } catch (error) {
+    res.status(400).json({ message: 'Error al obtener el estado del pago', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /service-requests/{id}/completar:
+ *   put:
+ *     summary: Marcar el servicio como completado y documentar el estado del paciente
+ *     tags: [ServiceRequests]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la solicitud de servicio
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               documentacion_servicio:
+ *                 type: string
+ *                 description: "Detalles y notas del servicio realizado y el estado del paciente"
+ *     responses:
+ *       200:
+ *         description: Servicio marcado como completado y documentado exitosamente
+ *       403:
+ *         description: Acceso denegado
+ *       400:
+ *         description: Error al completar el servicio
+ */
+router.put('/:id/completar', authenticateToken, async (req, res) => {
+  const { documentacion_servicio } = req.body;
+
+  try {
+    // Verificar que la solicitud pertenece al enfermero autenticado y que el estado es pendiente
+    const serviceRequest = await ServiceRequest.findOne({
+      _id: req.params.id,
+      nurse_id: req.userId,
+      estado: 'pendiente'
+    });
+
+    if (!serviceRequest) {
+      return res.status(403).json({ message: 'Acceso denegado o el servicio ya fue completado' });
+    }
+
+    // Actualizar la solicitud a estado completado y agregar documentación del servicio
+    serviceRequest.estado = 'completado';
+    serviceRequest.documentacion_servicio = documentacion_servicio;
+    serviceRequest.pago_liberado = true; // Liberar el pago al completar el servicio
+    await serviceRequest.save();
+
+    res.status(200).json({ message: 'Servicio completado y documentado exitosamente', serviceRequest });
+  } catch (error) {
+    res.status(400).json({ message: 'Error al completar el servicio', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /service-requests/{id}/reporte:
+ *   put:
+ *     summary: Completar el reporte del servicio con observaciones y recomendaciones
+ *     tags: [ServiceRequests]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la solicitud de servicio
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               observaciones:
+ *                 type: string
+ *                 description: "Observaciones sobre la atención prestada"
+ *               recomendaciones:
+ *                 type: string
+ *                 description: "Recomendaciones para el usuario"
+ *     responses:
+ *       200:
+ *         description: Reporte completado y enviado al usuario exitosamente
+ *       403:
+ *         description: Acceso denegado
+ *       400:
+ *         description: Error al completar el reporte
+ */
+router.put('/:id/reporte', authenticateToken, async (req, res) => {
+  const { observaciones, recomendaciones } = req.body;
+
+  try {
+    // Verificar que la solicitud pertenece al enfermero autenticado y que el estado es completado
+    const serviceRequest = await ServiceRequest.findOne({
+      _id: req.params.id,
+      nurse_id: req.userId,
+      estado: 'completado'
+    });
+
+    if (!serviceRequest) {
+      return res.status(403).json({ message: 'Acceso denegado o el servicio no está completado' });
+    }
+
+    // Completar el reporte de servicio
+    serviceRequest.observaciones = observaciones;
+    serviceRequest.recomendaciones = recomendaciones;
+    await serviceRequest.save();
+
+    // Notificación simulada (por ejemplo, enviar un correo electrónico o mensaje al usuario)
+    // Aquí solo agregamos un mensaje de éxito
+    res.status(200).json({
+      message: 'Reporte completado y notificado al usuario exitosamente',
+      report: {
+        observaciones: serviceRequest.observaciones,
+        recomendaciones: serviceRequest.recomendaciones
+      }
+    });
+  } catch (error) {
+    res.status(400).json({ message: 'Error al completar el reporte', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /service-requests/{id}:
+ *   put:
+ *     summary: Aceptar o rechazar una solicitud de servicio
+ *     tags: [ServiceRequests]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la solicitud de servicio
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               estado:
+ *                 type: string
+ *                 enum: [aceptada, rechazada]
+ *                 description: "Nuevo estado de la solicitud de servicio"
+ *     responses:
+ *       200:
+ *         description: Estado de la solicitud actualizado y notificación enviada
+ *       400:
+ *         description: Error al actualizar la solicitud
+ */
+router.put('/:id', authenticateToken, async (req, res) => {
+  const { estado } = req.body;
+
+  // Validar que el estado es aceptado o rechazado
+  if (!['aceptada', 'rechazada'].includes(estado)) {
+    return res.status(400).json({ message: 'Estado inválido, debe ser "aceptada" o "rechazada"' });
+  }
+
+  try {
+    // Verificar que la solicitud pertenece al enfermero autenticado
+    const serviceRequest = await ServiceRequest.findOneAndUpdate(
+      { _id: req.params.id, nurse_id: req.userId },
+      { estado },
+      { new: true }
+    );
+
+    if (!serviceRequest) {
+      return res.status(404).json({ message: 'Solicitud de servicio no encontrada' });
+    }
+
+    // Enviar notificación al cliente si el servicio fue aceptado
+    if (estado === 'aceptada') {
+      const user = await User.findById(serviceRequest.user_id);
+
+      if (user) {
+        // Enviar correo electrónico o notificación (simulación aquí)
+        // Por ejemplo, podrías usar un servicio de email como SendGrid o Nodemailer
+        console.log(`Notificación enviada a ${user.email}: Su solicitud de servicio ha sido aceptada.`);
+      }
+    }
+
+    res.status(200).json({ message: `Solicitud ${estado} exitosamente`, serviceRequest });
+  } catch (error) {
+    res.status(400).json({ message: 'Error al actualizar la solicitud', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /service-requests/{id}:
+ *   get:
+ *     summary: Obtener detalles de una solicitud de servicio aceptada
+ *     tags: [ServiceRequests]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la solicitud de servicio
+ *     responses:
+ *       200:
+ *         description: Detalles de la solicitud de servicio aceptada
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 nurse_name:
+ *                   type: string
+ *                 horario:
+ *                   type: string
+ *                 detalles:
+ *                   type: string
+ *                 patient_info:
+ *                   type: object
+ *                   properties:
+ *                     name:
+ *                       type: string
+ *                     fecha_nacimiento:
+ *                       type: string
+ *                     genero:
+ *                       type: string
+ *                     descripcion:
+ *                       type: string
+ *       403:
+ *         description: Acceso denegado
+ *       404:
+ *         description: Solicitud no encontrada o no aceptada
+ */
+router.get('/:id', authenticateToken, async (req, res) => {
+  try {
+    // Buscar la solicitud de servicio que pertenezca al usuario y que esté en estado "aceptada"
+    const serviceRequest = await ServiceRequest.findOne({
+      _id: req.params.id,
+      user_id: req.userId,
+      estado: 'aceptada'
+    }).populate('patient_ids', 'name fecha_nacimiento genero descripcion');
+
+    if (!serviceRequest) {
+      return res.status(404).json({ message: 'Solicitud no encontrada o aún no aceptada' });
+    }
+
+    // Obtener información del enfermero
+    const nurse = await Nurse.findById(serviceRequest.nurse_id, 'name');
+
+    if (!nurse) {
+      return res.status(404).json({ message: 'Enfermero no encontrado' });
+    }
+
+    // Formato de la respuesta con los detalles necesarios
+    res.status(200).json({
+      nurse_name: nurse.name,
+      horario: serviceRequest.fecha, // O ajusta para un formato adecuado
+      detalles: serviceRequest.detalles,
+      patient_info: serviceRequest.patient_ids
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error al obtener los detalles del servicio', error: error.message });
+  }
+});
+
+module.exports = router;
+
+routes\support.js:
+const express = require('express');
+const FAQ = require('../models/FAQ');
+
+const router = express.Router();
+
+/**
+ * @swagger
+ * tags:
+ *   name: Support
+ *   description: Endpoints para soporte técnico y ayuda
+ */
+
+/**
+ * @swagger
+ * /support/faq:
+ *   get:
+ *     summary: Obtener la lista de preguntas frecuentes (FAQ)
+ *     tags: [Support]
+ *     responses:
+ *       200:
+ *         description: Lista de preguntas frecuentes
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 properties:
+ *                   pregunta:
+ *                     type: string
+ *                   respuesta:
+ *                     type: string
+ */
+router.get('/faq', async (req, res) => {
+  try {
+    const faqs = await FAQ.find();
+    res.status(200).json(faqs);
+  } catch (error) {
+    res.status(500).json({ message: 'Error al obtener las preguntas frecuentes', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /support/request:
+ *   post:
+ *     summary: Enviar una solicitud de soporte técnico
+ *     tags: [Support]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               asunto:
+ *                 type: string
+ *                 description: "Asunto de la solicitud de soporte"
+ *               mensaje:
+ *                 type: string
+ *                 description: "Descripción detallada del problema"
+ *     responses:
+ *       201:
+ *         description: Solicitud de soporte enviada exitosamente
+ *       400:
+ *         description: Error al enviar la solicitud de soporte
+ */
+router.post('/request', authenticateToken, async (req, res) => {
+    const { asunto, mensaje } = req.body;
+    const tipo_usuario = req.userRole; // Asume que el rol está en el token (usuario o enfermero)
+  
+    try {
+      const supportRequest = new SupportRequest({
+        user_id: req.userId,
+        tipo_usuario,
+        asunto,
+        mensaje
+      });
+  
+      await supportRequest.save();
+  
+      // Notificación simulada al equipo de soporte
+      res.status(201).json({ message: 'Solicitud de soporte enviada exitosamente', supportRequest });
+    } catch (error) {
+      res.status(400).json({ message: 'Error al enviar la solicitud de soporte', error: error.message });
+    }
+  });
+  
+  module.exports = router;
+
+routes\transactions.js:
+const express = require('express');
+const Transaction = require('../models/Transaction');
+const { authenticateToken } = require('../middleware/auth');
+
+const router = express.Router();
+
+/**
+ * @swagger
+ * tags:
+ *   name: Transactions
+ *   description: Endpoints para la gestión de pagos y facturación
+ */
+
+/**
+ * @swagger
+ * /transactions:
+ *   get:
+ *     summary: Obtener el historial de pagos recibidos por el enfermero
+ *     tags: [Transactions]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Historial de pagos del enfermero
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 properties:
+ *                   service_request_id:
+ *                     type: string
+ *                   monto:
+ *                     type: number
+ *                   fecha_pago:
+ *                     type: string
+ *                     format: date-time
+ *                   estado:
+ *                     type: string
+ *       403:
+ *         description: Acceso denegado
+ */
+router.get('/', authenticateToken, async (req, res) => {
+  try {
+    const transactions = await Transaction.find({ nurse_id: req.userId }).sort({ fecha_pago: -1 });
+    res.status(200).json(transactions);
+  } catch (error) {
+    res.status(500).json({ message: 'Error al obtener el historial de pagos', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /transactions/{id}/factura:
+ *   post:
+ *     summary: Generar una factura para un usuario
+ *     tags: [Transactions]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la transacción
+ *     responses:
+ *       200:
+ *         description: Factura generada y enviada exitosamente
+ *       404:
+ *         description: Transacción no encontrada
+ *       403:
+ *         description: Acceso denegado
+ */
+router.post('/:id/factura', authenticateToken, async (req, res) => {
+    try {
+      // Verificar que la transacción pertenece al enfermero autenticado
+      const transaction = await Transaction.findOne({ _id: req.params.id, nurse_id: req.userId });
+  
+      if (!transaction) {
+        return res.status(404).json({ message: 'Transacción no encontrada o acceso denegado' });
+      }
+  
+      // Generar la factura (simulado aquí)
+      const factura = {
+        nurse_id: transaction.nurse_id,
+        user_id: transaction.user_id,
+        service_request_id: transaction.service_request_id,
+        monto: transaction.monto,
+        fecha_pago: transaction.fecha_pago,
+        estado: transaction.estado,
+        fecha_factura: new Date(),
+        detalles: 'Servicio de enfermería proporcionado' // Puedes personalizar el contenido de la factura
+      };
+  
+      // Enviar notificación al usuario (esto puede ser un correo o una notificación en la aplicación)
+      res.status(200).json({ message: 'Factura generada y enviada exitosamente', factura });
+    } catch (error) {
+      res.status(500).json({ message: 'Error al generar la factura', error: error.message });
+    }
+  });
+  
+  module.exports = router;
+  
+  routes\users.js:
+  const express = require('express');
+const User = require('../models/User');
+const { generateToken, authenticateToken } = require('../middleware/auth');
+
+const router = express.Router();
+
+/**
+ * @swagger
+ * tags:
+ *   name: Users
+ *   description: Endpoints para la gestión de usuarios
+ */
+
+/**
+ * @swagger
+ * /users/register:
+ *   post:
+ *     summary: Registro de usuario
+ *     tags: [Users]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *               user_name:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *               foto:
+ *                 type: string
+ *               verificado:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Usuario registrado exitosamente
+ *       400:
+ *         description: Error en el registro
+ */
+router.post('/register', async (req, res) => {
+  try {
+    const newUser = new User(req.body);
+    await newUser.save();
+    const token = generateToken(newUser._id);
+    res.status(201).json({ user: newUser, token });
+  } catch (error) {
+    res.status(400).json({ message: 'Error al registrar el usuario', error: error.message });
+  }
+});
+
+
+/**
+ * @swagger
+ * /users/login:
+ *   post:
+ *     summary: Inicio de sesión de usuario
+ *     tags: [Users]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               user_name:
+ *                 type: string
+ *                 description: "Nombre de usuario o correo electrónico del usuario"
+ *               password:
+ *                 type: string
+ *                 description: "Contraseña del usuario"
+ *     responses:
+ *       200:
+ *         description: Inicio de sesión exitoso
+ *       401:
+ *         description: Credenciales incorrectas
+ */
+router.post('/login', async (req, res) => {
+  const { user_name, password } = req.body;
+
+  try {
+    const user = await User.findOne({ user_name, password });
+    if (!user) {
+      return res.status(401).json({ message: 'Credenciales incorrectas' });
+    }
+
+    // Generar token JWT para el usuario
+    const token = generateToken({ userId: user._id, role: 'usuario' });
+    res.json({ token, role: 'usuario' });
+  } catch (error) {
+    res.status(500).json({ message: 'Error en el inicio de sesión', error: error.message });
+  }
+});
+
+module.exports = router;
+
+module.exports = router;
+/**
+ * @swagger
+ * /users/panel:
+ *   get:
+ *     summary: Acceso al panel principal del usuario
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Acceso al panel principal del usuario autenticado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: "Bienvenido al panel principal"
+ *                 opciones:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                   example: ["Buscar Enfermeros", "Mis Pacientes"]
+ *       401:
+ *         description: No autorizado, token no proporcionado o inválido
+ */
+router.get('/panel', authenticateToken, (req, res) => {
+    res.status(200).json({
+      message: "Bienvenido al panel principal",
+      opciones: ["Buscar Enfermeros", "Mis Pacientes"]
+    });
+  });
+  
